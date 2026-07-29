@@ -19,7 +19,7 @@ import sqlite3
 import subprocess
 import logging
 import httpx
-from datetime import time as dtime, datetime
+from datetime import time as dtime, datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import (
@@ -52,6 +52,17 @@ REPEATER_URL = os.environ.get("REPEATER_URL", "")
 
 WORK_DEFAULT = 25   # Pomodoro work minutes
 BREAK_DEFAULT = 5   # Pomodoro break minutes
+
+# Exam date for the countdown (YYYY-MM-DD)
+EXAM_DATE = os.environ.get("EXAM_DATE", "2026-08-28")
+
+
+def days_to_exam():
+    try:
+        y, m, d = map(int, EXAM_DATE.split("-"))
+        return (date(y, m, d) - datetime.now(TZ).date()).days
+    except Exception:
+        return None
 
 # --- AI assistant (Groq, free tier, OpenAI-compatible) ---
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
@@ -268,6 +279,29 @@ def _days(n: int):
     return timedelta(days=n)
 
 
+def get_streak(chat_id: int) -> int:
+    """Consecutive days (ending today or yesterday) with at least one focus session."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT day FROM focus_log WHERE chat_id=?", (chat_id,)
+        ).fetchall()
+    dayset = {r["day"] for r in rows}
+    if not dayset:
+        return 0
+    today = datetime.now(TZ).date()
+    if today.isoformat() in dayset:
+        cur = today
+    elif (today - timedelta(days=1)).isoformat() in dayset:
+        cur = today - timedelta(days=1)
+    else:
+        return 0
+    streak = 0
+    while cur.isoformat() in dayset:
+        streak += 1
+        cur = cur - timedelta(days=1)
+    return streak
+
+
 # --------------------------------------------------------------------------- #
 # UI helpers
 # --------------------------------------------------------------------------- #
@@ -308,6 +342,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/now — what should I do right now\n"
         "💬 Просто напиши сообщение — ИИ-помощник ответит (объяснит тему, проверит английский, поможет с задачей).\n"
         "/clear — очистить разговор с ИИ\n"
+        "/countdown — сколько дней до экзамена\n"
+        "/report — итоги дня (фокус, серия, до экзамена)\n"
         "/reload — apply plan changes you made on GitHub\n"
         "/pomodoro — start a focus timer (default 25/5)\n"
         "/stop — stop the current focus timer\n"
@@ -467,6 +503,52 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Forget the AI conversation so far."""
     AI_HISTORY.pop(update.effective_chat.id, None)
     await update.message.reply_text("🧹 Разговор с ИИ очищен. Начнём заново.")
+
+
+async def cmd_countdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    n = days_to_exam()
+    if n is None:
+        await update.message.reply_text("Дата экзамена не задана.")
+        return
+    if n > 1:
+        txt = f"📅 До экзамена ({EXAM_DATE[8:10]}.{EXAM_DATE[5:7]}) осталось {n} дн. Каждый день на счету — вперёд! 💪"
+    elif n == 1:
+        txt = "📅 До экзамена остался 1 день! Спокойно повтори главное и выспись. 🍀"
+    elif n == 0:
+        txt = "📅 Экзамен сегодня! Ты готовился — соберись и удачи! 🍀"
+    else:
+        txt = f"📅 Экзамен был {abs(n)} дн. назад. Надеюсь, всё прошло отлично!"
+    await update.message.reply_text(txt)
+
+
+def build_report(chat_id: int) -> str:
+    s = get_stats(chat_id)
+    streak = get_streak(chat_id)
+    n = days_to_exam()
+    lines = ["📊 Итоги дня", ""]
+    lines.append(f"🎯 Сегодня: {s['today_sessions']} сессий, {s['today_min']} мин фокуса")
+    lines.append(f"📈 За неделю: {s['week_sessions']} сессий, {s['week_min']} мин")
+    lines.append(f"🔥 Серия: {streak} дн. подряд")
+    if n is not None and n >= 0:
+        lines.append(f"📅 До экзамена: {n} дн.")
+    lines.append("")
+    if s["today_min"] == 0:
+        lines.append("Сегодня без фокуса — ничего, завтра наверстаем. Отдохни. 🌙")
+    else:
+        lines.append("Отличная работа сегодня! Не теряй серию. 💪")
+    return "\n".join(lines)
+
+
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(build_report(update.effective_chat.id))
+
+
+async def daily_report_cb(context: ContextTypes.DEFAULT_TYPE):
+    for chat_id in enabled_users():
+        try:
+            await context.bot.send_message(chat_id, build_report(chat_id))
+        except Exception as e:
+            log.warning("daily report to %s failed: %s", chat_id, e)
 
 
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -681,6 +763,8 @@ async def post_init(app: Application):
         BotCommand("plan", "See your daily plan"),
         BotCommand("now", "What should I do now?"),
         BotCommand("clear", "Clear the AI chat"),
+        BotCommand("countdown", "Days until the exam"),
+        BotCommand("report", "Today's study report"),
         BotCommand("reload", "Load plan changes from GitHub"),
         BotCommand("pomodoro", "Start a focus timer"),
         BotCommand("stop", "Stop the focus timer"),
@@ -719,6 +803,8 @@ def main():
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("now", cmd_now))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("countdown", cmd_countdown))
+    app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("pomodoro", cmd_pomodoro))
     app.add_handler(CommandHandler("stop", cmd_stop))
