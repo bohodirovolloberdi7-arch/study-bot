@@ -18,6 +18,7 @@ import asyncio
 import sqlite3
 import subprocess
 import logging
+import httpx
 from datetime import time as dtime, datetime
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,8 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 
@@ -49,6 +52,21 @@ REPEATER_URL = os.environ.get("REPEATER_URL", "")
 
 WORK_DEFAULT = 25   # Pomodoro work minutes
 BREAK_DEFAULT = 5   # Pomodoro break minutes
+
+# --- AI assistant (Google Gemini, free tier) ---
+AI_API_KEY = os.environ.get("AI_API_KEY", "")
+AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
+AI_SYSTEM_PROMPT = (
+    "Ты — дружелюбный помощник по учёбе для студента из Узбекистана, "
+    "который готовится к экзамену по математике и физике (28 августа). "
+    "Помогай понятно объяснять темы по математике и физике, проверять и "
+    "улучшать английский и русский, давать подсказки к задачам (веди к "
+    "решению, а не просто выдавай ответ) и поддерживай мотивацию. Отвечай "
+    "кратко и ясно, на том языке, на котором пишет пользователь (по "
+    "умолчанию по-русски)."
+)
+# Per-chat conversation history for the AI, in Gemini format.
+AI_HISTORY: dict[int, list] = {}
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -285,6 +303,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/plan — see your whole daily plan\n"
         "/now — what should I do right now\n"
+        "💬 Просто напиши сообщение — ИИ-помощник ответит (объяснит тему, проверит английский, поможет с задачей).\n"
+        "/clear — очистить разговор с ИИ\n"
         "/reload — apply plan changes you made on GitHub\n"
         "/pomodoro — start a focus timer (default 25/5)\n"
         "/stop — stop the current focus timer\n"
@@ -372,6 +392,57 @@ async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif current:
         lines.append("\n✅ На сегодня всё. Отдыхай и ложись вовремя.")
     await update.message.reply_text("\n".join(lines))
+
+
+async def ask_ai(chat_id: int, user_text: str) -> str:
+    """Send the user's message (with recent history) to Gemini and return the reply."""
+    hist = AI_HISTORY.setdefault(chat_id, [])
+    hist.append({"role": "user", "parts": [{"text": user_text}]})
+    payload = {
+        "system_instruction": {"parts": [{"text": AI_SYSTEM_PROMPT}]},
+        "contents": hist[-16:],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 900},
+    }
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{AI_MODEL}:generateContent?key={AI_API_KEY}"
+    )
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        data = r.json()
+    reply = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    hist.append({"role": "model", "parts": [{"text": reply}]})
+    # Keep history bounded.
+    if len(hist) > 24:
+        del hist[: len(hist) - 24]
+    return reply
+
+
+async def on_ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Any plain (non-command) text message goes to the AI assistant."""
+    if not update.message or not update.message.text:
+        return
+    if not AI_API_KEY:
+        await update.message.reply_text(
+            "🤖 ИИ-помощник ещё не подключён. Нужен бесплатный ключ Gemini "
+            "(google AI Studio) — попроси помощи с настройкой."
+        )
+        return
+    chat_id = update.effective_chat.id
+    await context.bot.send_chat_action(chat_id, "typing")
+    try:
+        reply = await ask_ai(chat_id, update.message.text)
+    except Exception as e:
+        log.warning("AI error: %s", e)
+        reply = "🤖 Не получилось получить ответ от ИИ. Попробуй ещё раз через минуту."
+    await update.message.reply_text(reply)
+
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forget the AI conversation so far."""
+    AI_HISTORY.pop(update.effective_chat.id, None)
+    await update.message.reply_text("🧹 Разговор с ИИ очищен. Начнём заново.")
 
 
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -585,6 +656,7 @@ async def post_init(app: Application):
         BotCommand("start", "Open the menu"),
         BotCommand("plan", "See your daily plan"),
         BotCommand("now", "What should I do now?"),
+        BotCommand("clear", "Clear the AI chat"),
         BotCommand("reload", "Load plan changes from GitHub"),
         BotCommand("pomodoro", "Start a focus timer"),
         BotCommand("stop", "Stop the focus timer"),
@@ -622,6 +694,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("plan", cmd_plan))
     app.add_handler(CommandHandler("now", cmd_now))
+    app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("pomodoro", cmd_pomodoro))
     app.add_handler(CommandHandler("stop", cmd_stop))
@@ -630,6 +703,7 @@ def main():
     app.add_handler(CommandHandler("reminders_on", cmd_rem_on))
     app.add_handler(CommandHandler("reminders_off", cmd_rem_off))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_ai_message))
 
     log.info("Study bot starting…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
