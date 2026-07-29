@@ -397,11 +397,33 @@ async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+def _plan_text_for_ai() -> str:
+    """Render the current plan as compact plain text for the AI's context."""
+    labels = {
+        "all": "Каждый день", "mon-sat": "Пн–Сб", "sun": "Вс",
+        "mon,wed,fri": "Пн/Ср/Пт (физика дома)", "tue,thu,sat": "Вт/Чт/Сб (математика)",
+    }
+    rows = sorted(REMINDERS, key=lambda x: (days_to_text(x[2]), x[0], x[1]))
+    out = []
+    for h, m, days, msg in rows:
+        key = days_to_text(days)
+        out.append(f"{labels.get(key, key)} {h:02d}:{m:02d} — {msg}")
+    return "\n".join(out)
+
+
 async def ask_ai(chat_id: int, user_text: str) -> str:
     """Send the user's message (with recent history) to the AI and return the reply."""
     hist = AI_HISTORY.setdefault(chat_id, [])
     hist.append({"role": "user", "content": user_text})
-    messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}] + hist[-16:]
+    system = AI_SYSTEM_PROMPT
+    plan = _plan_text_for_ai()
+    if plan:
+        system += (
+            "\n\nВот текущий распорядок дня ученика (его расписание). Используй "
+            "его, когда он спрашивает про учёбу, эффективность или сам план — "
+            "давай советы под этот конкретный распорядок:\n" + plan
+        )
+    messages = [{"role": "system", "content": system}] + hist[-16:]
     payload = {
         "model": AI_MODEL,
         "messages": messages,
