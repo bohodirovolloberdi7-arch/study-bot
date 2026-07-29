@@ -15,6 +15,7 @@ Everything is one file so it is easy to deploy. See README.md for setup.
 
 import os
 import asyncio
+import json
 import sqlite3
 import subprocess
 import logging
@@ -240,6 +241,236 @@ def init_db():
             "id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, "
             "day TEXT, ts TEXT, minutes INTEGER)"
         )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS vocab ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, "
+            "front TEXT, back TEXT, box INTEGER DEFAULT 0, due TEXT)"
+        )
+
+
+# Spaced-repetition intervals per box (days).
+VOCAB_INTERVALS = [0, 1, 3, 7, 16, 30]
+
+
+def vocab_add(chat_id: int, front: str, back: str, box=None, due=None) -> bool:
+    front, back = front.strip(), back.strip()
+    if not front or not back:
+        return False
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    b = max(0, min(int(box), len(VOCAB_INTERVALS) - 1)) if box is not None else 0
+    d = due or today
+    with db() as conn:
+        exists = conn.execute(
+            "SELECT id FROM vocab WHERE chat_id=? AND front=? AND back=?",
+            (chat_id, front, back),
+        ).fetchone()
+        if exists:
+            if box is not None or due is not None:
+                conn.execute(
+                    "UPDATE vocab SET box=?, due=? WHERE id=?", (b, d, exists["id"])
+                )
+                return True
+            return False
+        conn.execute(
+            "INSERT INTO vocab (chat_id, front, back, box, due) VALUES (?,?,?,?,?)",
+            (chat_id, front, back, b, d),
+        )
+    return True
+
+
+def vocab_import(chat_id: int, text: str) -> int:
+    """Parse 'word <sep> translation' lines and add them. Returns count added."""
+    seps = ["\t", " — ", " - ", " – ", ";", "|", ",", "="]
+    added = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        pair = None
+        for sep in seps:
+            if sep in line:
+                a, _, b = line.partition(sep)
+                pair = (a, b)
+                break
+        if not pair:
+            continue
+        if vocab_add(chat_id, pair[0], pair[1]):
+            added += 1
+    return added
+
+
+def _parse_date_like(v):
+    """Best-effort parse of a date/timestamp from an old app's export into YYYY-MM-DD."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        try:
+            ts = v / 1000 if v > 1e12 else v  # ms vs s epoch
+            return datetime.fromtimestamp(ts, TZ).strftime("%Y-%m-%d")
+        except Exception:
+            return None
+    if isinstance(v, str):
+        v = v.strip()
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(v[:19], fmt).strftime("%Y-%m-%d")
+            except Exception:
+                continue
+    return None
+
+
+def _extract_stats(obj):
+    """Pull a (box, due) hint from an old app's per-word stats, if present."""
+    if not isinstance(obj, dict):
+        return None, None
+    low = {str(k).lower(): v for k, v in obj.items()}
+    box = None
+    for k in ("box", "level", "stage", "srsbox", "interval_index", "rank"):
+        if k in low and isinstance(low[k], (int, float)):
+            box = int(low[k])
+            break
+    if box is None:
+        correct = low.get("correct", low.get("correctcount", low.get("known")))
+        wrong = low.get("wrong", low.get("incorrectcount", low.get("mistakes")))
+        if isinstance(correct, (int, float)) and isinstance(wrong, (int, float)):
+            box = int(correct) - int(wrong)
+    if box is not None:
+        box = max(0, min(box, len(VOCAB_INTERVALS) - 1))
+    due = None
+    for k in ("due", "nextreview", "next_due", "nextdue", "next_review_date", "reviewdate"):
+        if k in low:
+            due = _parse_date_like(low[k])
+            if due:
+                break
+    if due is None and box is not None:
+        for k in ("lastreview", "last_seen", "lastseen", "reviewed_at"):
+            if k in low:
+                last = _parse_date_like(low[k])
+                if last:
+                    y, m, d = map(int, last.split("-"))
+                    due = (date(y, m, d) + timedelta(days=VOCAB_INTERVALS[box])).strftime("%Y-%m-%d")
+                    break
+    return box, due
+
+
+def _pair_from_obj(obj):
+    """Extract (front, back) from a dict or 2-element list, trying common keys."""
+    if isinstance(obj, (list, tuple)) and len(obj) >= 2:
+        return str(obj[0]), str(obj[1])
+    if isinstance(obj, dict):
+        low = {str(k).lower(): v for k, v in obj.items()}
+        for a, b in [
+            ("front", "back"), ("word", "translation"), ("word", "meaning"),
+            ("en", "ru"), ("eng", "rus"), ("english", "russian"), ("english", "uzbek"),
+            ("term", "definition"), ("question", "answer"), ("q", "a"),
+            ("key", "value"), ("source", "target"),
+        ]:
+            if a in low and b in low:
+                return str(low[a]), str(low[b])
+        vals = [v for v in obj.values() if isinstance(v, (str, int, float))]
+        if len(vals) >= 2:
+            return str(vals[0]), str(vals[1])
+    return None
+
+
+def vocab_import_ascend(chat_id: int, data: dict) -> int:
+    """Import from the 'Ascend' app export: vocabList/learnedWords with stage (0-11)
+    and nextReview (epoch ms). Scales their 12-stage SRS to our 6-box scale."""
+    max_box = len(VOCAB_INTERVALS) - 1  # 5
+    items = list(data.get("vocabList") or []) + list(data.get("learnedWords") or [])
+    added = 0
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        eng = it.get("english")
+        translation = it.get("russian") or it.get("uzbek") or it.get("meaning")
+        if not eng or not translation:
+            continue
+        stage = it.get("stage")
+        box = None
+        if isinstance(stage, (int, float)):
+            box = max(0, min(round(stage / 11 * max_box), max_box))
+        due = _parse_date_like(it.get("nextReview"))
+        if vocab_add(chat_id, str(eng), str(translation), box=box, due=due):
+            added += 1
+    return added
+
+
+def vocab_import_json(chat_id: int, text: str):
+    """Import words from JSON. Returns count added, or None if text isn't valid JSON."""
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    if isinstance(data, dict) and ("vocabList" in data or "learnedWords" in data):
+        return vocab_import_ascend(chat_id, data)
+    added = 0
+    if isinstance(data, dict) and data and all(
+        isinstance(v, (str, int, float)) for v in data.values()
+    ):
+        # {"hello": "привет", ...}
+        for k, v in data.items():
+            if vocab_add(chat_id, str(k), str(v)):
+                added += 1
+        return added
+    # otherwise look for a list of items (top-level, or nested under a key)
+    items = data if isinstance(data, list) else None
+    if items is None and isinstance(data, dict):
+        for v in data.values():
+            if isinstance(v, list):
+                items = v
+                break
+    for item in items or []:
+        pair = _pair_from_obj(item)
+        if pair:
+            box, due = _extract_stats(item)
+            if vocab_add(chat_id, pair[0], pair[1], box=box, due=due):
+                added += 1
+    return added
+
+
+def vocab_next(chat_id: int):
+    """Return the most-due card (due today or overdue), else the earliest upcoming."""
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM vocab WHERE chat_id=? AND due<=? ORDER BY due ASC, id ASC LIMIT 1",
+            (chat_id, today),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT * FROM vocab WHERE chat_id=? ORDER BY due ASC, id ASC LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+    return row
+
+
+def vocab_get(card_id: int):
+    with db() as conn:
+        return conn.execute("SELECT * FROM vocab WHERE id=?", (card_id,)).fetchone()
+
+
+def vocab_grade(card_id: int, known: bool):
+    with db() as conn:
+        row = conn.execute("SELECT box FROM vocab WHERE id=?", (card_id,)).fetchone()
+        if not row:
+            return
+        box = row["box"]
+        box = min(box + 1, len(VOCAB_INTERVALS) - 1) if known else 0
+        due = (datetime.now(TZ) + timedelta(days=VOCAB_INTERVALS[box])).strftime("%Y-%m-%d")
+        conn.execute("UPDATE vocab SET box=?, due=? WHERE id=?", (box, due, card_id))
+
+
+def vocab_counts(chat_id: int):
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    with db() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) c FROM vocab WHERE chat_id=?", (chat_id,)
+        ).fetchone()["c"]
+        due = conn.execute(
+            "SELECT COUNT(*) c FROM vocab WHERE chat_id=? AND due<=?", (chat_id, today)
+        ).fetchone()["c"]
+    return total, due
 
 
 def register_user(chat_id: int):
@@ -363,6 +594,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/plan — see your whole daily plan\n"
         "/edit — изменить план словами (напр.: /edit добавь чтение в 21:00)\n"
+        "/vocab — тренажёр слов (флэш-карточки прямо в боте)\n"
+        "/addword слово - перевод — добавить слово (или пришли файл .txt)\n"
         "/now — what should I do right now\n"
         "💬 Просто напиши сообщение — ИИ-помощник ответит (объяснит тему, проверит английский, поможет с задачей).\n"
         "/clear — очистить разговор с ИИ\n"
@@ -612,6 +845,101 @@ async def _apply_pending_edit(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     )
 
 
+def _vocab_card_kb_front(card_id: int):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("👁 Показать ответ", callback_data=f"voc_show:{card_id}")
+    ]])
+
+
+def _vocab_card_kb_back(card_id: int):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Знаю", callback_data=f"voc_know:{card_id}"),
+        InlineKeyboardButton("❌ Не знаю", callback_data=f"voc_no:{card_id}"),
+    ]])
+
+
+async def _send_next_card(context, chat_id):
+    row = vocab_next(chat_id)
+    if row is None:
+        total, _ = vocab_counts(chat_id)
+        if total == 0:
+            await context.bot.send_message(
+                chat_id,
+                "📭 Словарь пуст. Добавь слова:\n"
+                "• одним: /addword hello — привет\n"
+                "• списком: пришли файл .txt, где каждая строка «слово - перевод».",
+            )
+        else:
+            await context.bot.send_message(chat_id, "🎉 На сегодня все слова повторены! Отдыхай.")
+        return
+    await context.bot.send_message(
+        chat_id, f"🇬🇧 <b>{row['front']}</b>\n\nВспомни перевод…",
+        parse_mode="HTML", reply_markup=_vocab_card_kb_front(row["id"]),
+    )
+
+
+async def cmd_vocab(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _send_next_card(context, update.effective_chat.id)
+
+
+async def cmd_addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args) if context.args else ""
+    added = vocab_import(update.effective_chat.id, text) if text else 0
+    if added:
+        total, due = vocab_counts(update.effective_chat.id)
+        await update.message.reply_text(f"➕ Добавлено! Всего слов: {total}. Напиши /vocab для тренировки.")
+    else:
+        await update.message.reply_text(
+            "Формат: /addword слово - перевод\nНапример: /addword improve — улучшать"
+        )
+
+
+async def cmd_vocabstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total, due = vocab_counts(update.effective_chat.id)
+    await update.message.reply_text(
+        f"📚 Словарь: {total} слов, к повторению сегодня: {due}."
+    )
+
+
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Import vocabulary from an uploaded text/CSV/JSON file."""
+    doc = update.message.document
+    name = (doc.file_name or "").lower()
+    ok_ext = name.endswith((".txt", ".csv", ".json"))
+    ok_mime = doc.mime_type in ("text/plain", "text/csv", "application/json")
+    if not (ok_ext or ok_mime):
+        await update.message.reply_text(
+            "Пришли файл .txt, .csv или .json.\n"
+            "• .txt/.csv: каждая строка «слово - перевод»\n"
+            "• .json: {\"hello\": \"привет\"} или [{\"word\":\"hello\",\"translation\":\"привет\"}]"
+        )
+        return
+    try:
+        f = await context.bot.get_file(doc.file_id)
+        raw = await f.download_as_bytearray()
+        text = bytes(raw).decode("utf-8", errors="replace")
+    except Exception as e:
+        log.warning("doc import error: %s", e)
+        await update.message.reply_text("Не смог прочитать файл. Попробуй кодировку UTF-8.")
+        return
+    # JSON first if it looks like JSON; otherwise line-based text.
+    added = None
+    if name.endswith(".json") or text.lstrip()[:1] in ("{", "["):
+        added = vocab_import_json(update.effective_chat.id, text)
+    if not added:  # None (not JSON) or 0 — fall back to line parsing
+        added = vocab_import(update.effective_chat.id, text)
+    total, _ = vocab_counts(update.effective_chat.id)
+    if added:
+        await update.message.reply_text(
+            f"✅ Импортировал {added} слов. Всего: {total}. Напиши /vocab чтобы начать!"
+        )
+    else:
+        await update.message.reply_text(
+            "Не нашёл слов. Проверь формат: «hello - привет» построчно, "
+            "или JSON вида {\"hello\": \"привет\"}."
+        )
+
+
 async def on_ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Any plain (non-command) text message goes to the AI assistant."""
     if not update.message or not update.message.text:
@@ -856,6 +1184,21 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "edit_cancel":
         PENDING_EDITS.pop(chat_id, None)
         await context.bot.send_message(chat_id, "❌ Отменено. План без изменений.")
+    elif data.startswith("voc_show:"):
+        row = vocab_get(int(data.split(":")[1]))
+        if row:
+            await q.edit_message_text(
+                f"🇬🇧 <b>{row['front']}</b>\n🇷🇺 {row['back']}",
+                parse_mode="HTML", reply_markup=_vocab_card_kb_back(row["id"]),
+            )
+    elif data.startswith("voc_know:") or data.startswith("voc_no:"):
+        cid = int(data.split(":")[1])
+        vocab_grade(cid, data.startswith("voc_know:"))
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await _send_next_card(context, chat_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -900,6 +1243,8 @@ async def post_init(app: Application):
         BotCommand("start", "Open the menu"),
         BotCommand("plan", "See your daily plan"),
         BotCommand("edit", "Change your plan (just tell it)"),
+        BotCommand("vocab", "Practice vocabulary flashcards"),
+        BotCommand("addword", "Add a vocabulary word"),
         BotCommand("now", "What should I do now?"),
         BotCommand("clear", "Clear the AI chat"),
         BotCommand("countdown", "Days until the exam"),
@@ -946,6 +1291,9 @@ def main():
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("edit", cmd_edit))
+    app.add_handler(CommandHandler("vocab", cmd_vocab))
+    app.add_handler(CommandHandler("addword", cmd_addword))
+    app.add_handler(CommandHandler("vocabstats", cmd_vocabstats))
     app.add_handler(CommandHandler("pomodoro", cmd_pomodoro))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("stats", cmd_stats))
@@ -953,6 +1301,7 @@ def main():
     app.add_handler(CommandHandler("reminders_on", cmd_rem_on))
     app.add_handler(CommandHandler("reminders_off", cmd_rem_off))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_ai_message))
 
     log.info("Study bot starting…")
