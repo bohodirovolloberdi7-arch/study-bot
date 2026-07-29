@@ -157,6 +157,45 @@ def parse_days(token: str) -> set:
     return result or set(range(7))
 
 
+def _parse_schedule_line(line: str):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    parts = line.split("|")
+    if len(parts) < 3:
+        return None
+    t = parts[0].strip()
+    days = parse_days(parts[1])
+    msg = "|".join(parts[2:]).strip()
+    try:
+        hh, mm = t.split(":")
+        return (int(hh), int(mm), days, msg)
+    except ValueError:
+        return None
+
+
+def parse_schedule_text(text: str) -> list:
+    out = []
+    for raw in text.splitlines():
+        e = _parse_schedule_line(raw)
+        if e:
+            out.append(e)
+    return out
+
+
+def _serialize_schedule(entries: list) -> str:
+    header = [
+        "# ТВОЙ ПЛАН ДНЯ — меняй через /edit в Telegram или на GitHub + /reload.",
+        "# Формат:   ЧЧ:ММ | дни | сообщение",
+        "# дни: all, mon-sat, sun, или список вроде mon,wed,fri",
+        "",
+    ]
+    lines = header + [
+        f"{h:02d}:{m:02d} | {days_to_text(d)} | {msg}" for h, m, d, msg in entries
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def write_default_schedule(path: str):
     header = [
         "# YOUR DAILY PLAN — edit this file on GitHub, then send /reload in Telegram.",
@@ -177,24 +216,8 @@ def load_schedule(path: str) -> list:
         write_default_schedule(path)
         log.info("Wrote a starter plan to %s — edit it any time.", path)
         return list(DEFAULT_SCHEDULE)
-    out = []
     with open(path, encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("|")
-            if len(parts) < 3:
-                continue
-            t = parts[0].strip()
-            days = parse_days(parts[1])
-            msg = "|".join(parts[2:]).strip()
-            try:
-                hh, mm = t.split(":")
-                h, m = int(hh), int(mm)
-            except ValueError:
-                continue
-            out.append((h, m, days, msg))
+        out = [e for e in (_parse_schedule_line(l) for l in f) if e]
     return out or list(DEFAULT_SCHEDULE)
 
 # --------------------------------------------------------------------------- #
@@ -339,6 +362,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "sessions, keep your stats, and open your English apps right here.\n\n"
         "Commands:\n"
         "/plan — see your whole daily plan\n"
+        "/edit — изменить план словами (напр.: /edit добавь чтение в 21:00)\n"
         "/now — what should I do right now\n"
         "💬 Просто напиши сообщение — ИИ-помощник ответит (объяснит тему, проверит английский, поможет с задачей).\n"
         "/clear — очистить разговор с ИИ\n"
@@ -477,6 +501,115 @@ async def ask_ai(chat_id: int, user_text: str) -> str:
     if len(hist) > 24:
         del hist[: len(hist) - 24]
     return reply
+
+
+async def ai_complete(system: str, user: str) -> str:
+    """One-shot AI call (no history) — used for structured tasks like plan edits."""
+    payload = {
+        "model": AI_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 1500,
+    }
+    headers = {"Authorization": f"Bearer {AI_API_KEY}"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(AI_BASE_URL, json=payload, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+    return data["choices"][0]["message"]["content"].strip()
+
+
+def _format_entries(entries: list) -> str:
+    """Plain-text grouped view of a plan (safe to send without markdown)."""
+    labels = {
+        "all": "Каждый день", "mon,wed,fri": "Пн/Ср/Пт", "mon-sat": "Пн–Сб",
+        "tue,thu,sat": "Вт/Чт/Сб", "sun": "Вс",
+    }
+    groups: dict[str, list] = {}
+    for h, m, d, msg in entries:
+        groups.setdefault(days_to_text(d), []).append((h, m, msg))
+    order = ["all", "mon,wed,fri", "mon-sat", "tue,thu,sat", "sun"]
+    keys = order + [k for k in groups if k not in order]
+    out = []
+    for k in keys:
+        if k not in groups:
+            continue
+        out.append(f"— {labels.get(k, k)} —")
+        for h, m, msg in sorted(groups[k]):
+            out.append(f"{h:02d}:{m:02d}  {msg}")
+        out.append("")
+    return "\n".join(out).strip()
+
+
+# chat_id -> serialized new schedule text awaiting confirmation
+PENDING_EDITS: dict[int, str] = {}
+
+
+async def cmd_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Change the plan in plain language; AI applies it, user confirms."""
+    chat_id = update.effective_chat.id
+    instr = " ".join(context.args).strip() if context.args else ""
+    if not instr:
+        await update.message.reply_text(
+            "✏️ Напиши, что изменить в плане. Примеры:\n"
+            "/edit добавь чтение в 21:00 каждый день\n"
+            "/edit перенеси ужин на 19:00\n"
+            "/edit убери утреннюю пробежку в среду"
+        )
+        return
+    if not AI_API_KEY:
+        await update.message.reply_text("Для /edit нужен ИИ-ключ (Groq).")
+        return
+    await context.bot.send_chat_action(chat_id, "typing")
+    current = _serialize_schedule(REMINDERS)
+    system = (
+        "Ты редактируешь расписание дня. Тебе дают текущее расписание (строки "
+        "формата 'ЧЧ:ММ | дни | сообщение'; дни: all, mon-sat, sun или список "
+        "вроде mon,wed,fri) и инструкцию. Верни ПОЛНОЕ новое расписание в том же "
+        "формате — только строки расписания, без пояснений, без markdown, без "
+        "тройных кавычек. Строки, которых инструкция не касается, оставь без "
+        "изменений."
+    )
+    try:
+        out = await ai_complete(system, f"Текущее расписание:\n{current}\n\nИнструкция: {instr}")
+    except Exception as e:
+        log.warning("edit ai error: %s", e)
+        await update.message.reply_text("Не получилось. Попробуй ещё раз через минуту.")
+        return
+    entries = parse_schedule_text(out)
+    if len(entries) < 3:
+        await update.message.reply_text(
+            "Не понял правку. Попробуй сформулировать иначе, например: "
+            "«добавь чтение в 21:00 каждый день»."
+        )
+        return
+    PENDING_EDITS[chat_id] = _serialize_schedule(entries)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Применить", callback_data="edit_apply"),
+        InlineKeyboardButton("❌ Отмена", callback_data="edit_cancel"),
+    ]])
+    preview = _format_entries(entries)
+    if len(preview) > 3500:
+        preview = preview[:3500] + "\n…"
+    await update.message.reply_text("Вот новый план:\n\n" + preview + "\n\nПрименить?", reply_markup=kb)
+
+
+async def _apply_pending_edit(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    global REMINDERS
+    text = PENDING_EDITS.pop(chat_id, None)
+    if not text:
+        await context.bot.send_message(chat_id, "Нечего применять.")
+        return
+    with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
+        f.write(text)
+    REMINDERS = load_schedule(SCHEDULE_FILE)
+    reschedule_reminders(context.application)
+    await context.bot.send_message(
+        chat_id, "✅ План обновлён!\n\n" + _format_entries(REMINDERS)
+    )
 
 
 async def on_ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -718,6 +851,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "rem_off":
         set_reminders(chat_id, False)
         await context.bot.send_message(chat_id, "🔕 Daily reminders OFF.")
+    elif data == "edit_apply":
+        await _apply_pending_edit(context, chat_id)
+    elif data == "edit_cancel":
+        PENDING_EDITS.pop(chat_id, None)
+        await context.bot.send_message(chat_id, "❌ Отменено. План без изменений.")
 
 
 # --------------------------------------------------------------------------- #
@@ -761,6 +899,7 @@ async def post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "Open the menu"),
         BotCommand("plan", "See your daily plan"),
+        BotCommand("edit", "Change your plan (just tell it)"),
         BotCommand("now", "What should I do now?"),
         BotCommand("clear", "Clear the AI chat"),
         BotCommand("countdown", "Days until the exam"),
@@ -806,6 +945,7 @@ def main():
     app.add_handler(CommandHandler("countdown", cmd_countdown))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("reload", cmd_reload))
+    app.add_handler(CommandHandler("edit", cmd_edit))
     app.add_handler(CommandHandler("pomodoro", cmd_pomodoro))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("stats", cmd_stats))
