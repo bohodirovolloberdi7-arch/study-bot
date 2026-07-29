@@ -1,18 +1,45 @@
-# YOUR DAILY PLAN — edit this file on GitHub, then send /reload in Telegram.
-# Format:   HH:MM | days | message
-# days can be:  all   mon-sat   sun   or a list like  mon,wed,fri
-# Lines starting with # are notes and are ignored.
+# ТВОЙ ПЛАН ДНЯ — редактируй этот файл на GitHub, потом отправь /reload в Telegram.
+# Формат:   ЧЧ:ММ | дни | сообщение
+# дни: all (все)   mon-sat (пн–сб)   sun (вс)   или список, например  mon,wed,fri
+# Дни пиши по-английски: пн=mon вт=tue ср=wed чт=thu пт=fri сб=sat вс=sun
+# Строки, начинающиеся с #, — это заметки, они игнорируются.
 
-06:00 | mon-sat | ☀️ Wake up. Wash, breakfast, pack your bag. Leave by 6:30.
-06:30 | mon-sat | 🚌 Commute — open English or Russian practice. Tap /apps for the Vocab Trainer.
-12:30 | mon-sat | 🚌 Heading home — start homework NOW while the lesson is fresh. Redo the class examples.
-15:00 | mon-sat | 🐔 Poultry care, then real rest.
-16:00 | mon-sat | 🏃 Fitness — move your body, then shower. It sharpens your evening focus.
-17:30 | mon-sat | 📚 Homework block 1 — finish the problem set. Try /pomodoro.
-19:30 | mon-sat | 🔥 Your peak hours. Hardest work now: finish homework, then drill weak fundamentals. /pomodoro
-21:30 | mon-sat | 🔁 Light review — flashcards or a short dose of the other language. /apps
-22:00 | mon-sat | 🌙 Wind down. Pack tomorrow's bag. No hard screens.
-22:50 | mon-sat | 😴 Sleep soon — you need 7 hours. Lights out by 23:00.
-07:30 | sun | 🌤️ Slow Sunday. Hygiene, poultry, a good breakfast, rest.
-16:00 | sun | 📖 Catch-up study (2–3h): weak spots from the week + one timed practice test. /pomodoro
-21:30 | sun | ✅ Wrap up and recharge for Monday. Sleep on time.
+# --- Дни самостоятельной физики (Пн, Ср, Пт) — дома, без дороги ---
+06:30 | mon,wed,fri | ☀️ Подъём, умыться. Сегодня самостоятельная физика (без дороги).
+06:45 | mon,wed,fri | 🍳 Завтрак — приготовь и спокойно поешь.
+07:30 | mon,wed,fri | 🎥 Физика на YouTube — смотри тему медленно и делай заметки. Пойми, не спеши.
+09:00 | mon,wed,fri | ✍️ Перепиши главные формулы своими словами. Потом короткий перерыв.
+10:00 | mon,wed,fri | 🎥 Физика, часть 2 — следующая тема или пересмотри сложные места.
+11:30 | mon,wed,fri | 📗 Математика — реши несколько задач с прошлого урока.
+12:30 | mon,wed,fri | 🍳 Обед — приготовь и поешь. Потом настоящий отдых.
+14:00 | mon,wed,fri | 🐔 Уход за птицей.
+14:30 | mon,wed,fri | 🗣️ Практика английского или русского. /apps
+16:00 | mon,wed,fri | 🏃 Спорт — подвигайся, потом душ.
+18:00 | mon,wed,fri | 🍳 Ужин — приготовь и поешь.
+19:30 | mon,wed,fri | 🔥 Пик энергии: РЕШАЙ задачи по физике на сегодняшнюю тему. /pomodoro
+21:00 | mon,wed,fri | 🔁 Разбери ошибки и отметь, что пересмотреть в следующий раз.
+22:00 | mon,wed,fri | 🌙 Успокойся, готовься ко сну. Без тяжёлых экранов.
+22:50 | mon,wed,fri | 😴 Скоро спать — тебе нужно 7 часов сна.
+
+# --- Дни уроков математики (Вт, Чт, Сб) ---
+06:00 | tue,thu,sat | ☀️ Подъём, умыться.
+06:15 | tue,thu,sat | 🍳 Быстрый завтрак — поешь перед дорогой. Собери сумку.
+06:30 | tue,thu,sat | 🚌 В дороге — практика английского или русского. /apps
+12:30 | tue,thu,sat | 🚌 Едешь домой — начинай домашку по математике, пока урок свежий.
+14:00 | tue,thu,sat | 🍳 Обед — приготовь и поешь. Отдых.
+15:00 | tue,thu,sat | 🐔 Уход за птицей.
+16:00 | tue,thu,sat | 🏃 Спорт — подвигайся, потом душ. Заряжает вечернюю концентрацию.
+17:30 | tue,thu,sat | 📚 Домашка, блок 1 — закончи задачи по математике. /pomodoro
+18:30 | tue,thu,sat | 🍳 Ужин — приготовь и поешь.
+19:30 | tue,thu,sat | 🔥 Пик энергии: доделай домашку, потом отрабатывай слабые основы. /pomodoro
+21:30 | tue,thu,sat | 🔁 Лёгкое повторение — карточки или немного другого языка. /apps
+22:00 | tue,thu,sat | 🌙 Успокойся. Собери сумку на завтра. Без тяжёлых экранов.
+22:50 | tue,thu,sat | 😴 Скоро спать — 7 часов сна. Отбой к 23:00.
+
+# --- Воскресенье (половина — отдых, половина — учёба) ---
+07:30 | sun | 🌤️ Спокойное утро. Гигиена, уход за птицей.
+08:00 | sun | 🍳 Хороший завтрак — приготовь и поешь. Отдых.
+13:00 | sun | 🍳 Обед — приготовь и поешь.
+16:00 | sun | 📖 Наверстай (2–3 ч): самые слабые темы недели (математика + физика) + пробный тест на время. /pomodoro
+18:30 | sun | 🍳 Ужин — приготовь и поешь.
+21:30 | sun | ✅ Заверши неделю и восстановись перед понедельником. Ложись вовремя.
