@@ -244,36 +244,41 @@ def init_db():
         conn.execute(
             "CREATE TABLE IF NOT EXISTS vocab ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, "
-            "front TEXT, back TEXT, box INTEGER DEFAULT 0, due TEXT)"
+            "front TEXT, back TEXT, box INTEGER DEFAULT 0, due TEXT, extra TEXT)"
         )
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(vocab)").fetchall()}
+        if "extra" not in cols:
+            conn.execute("ALTER TABLE vocab ADD COLUMN extra TEXT")
 
 
 # Spaced-repetition intervals per box (days).
 VOCAB_INTERVALS = [0, 1, 3, 7, 16, 30]
 
 
-def vocab_add(chat_id: int, front: str, back: str, box=None, due=None) -> bool:
+def vocab_add(chat_id: int, front: str, back: str, box=None, due=None, extra=None) -> bool:
     front, back = front.strip(), back.strip()
     if not front or not back:
         return False
+    extra = extra.strip() if isinstance(extra, str) and extra.strip() else None
     today = datetime.now(TZ).strftime("%Y-%m-%d")
     b = max(0, min(int(box), len(VOCAB_INTERVALS) - 1)) if box is not None else 0
     d = due or today
     with db() as conn:
         exists = conn.execute(
-            "SELECT id FROM vocab WHERE chat_id=? AND front=? AND back=?",
+            "SELECT id, extra FROM vocab WHERE chat_id=? AND front=? AND back=?",
             (chat_id, front, back),
         ).fetchone()
         if exists:
-            if box is not None or due is not None:
+            if box is not None or due is not None or extra is not None:
                 conn.execute(
-                    "UPDATE vocab SET box=?, due=? WHERE id=?", (b, d, exists["id"])
+                    "UPDATE vocab SET box=?, due=?, extra=COALESCE(?, extra) WHERE id=?",
+                    (b, d, extra, exists["id"]),
                 )
                 return True
             return False
         conn.execute(
-            "INSERT INTO vocab (chat_id, front, back, box, due) VALUES (?,?,?,?,?)",
-            (chat_id, front, back, b, d),
+            "INSERT INTO vocab (chat_id, front, back, box, due, extra) VALUES (?,?,?,?,?,?)",
+            (chat_id, front, back, b, d, extra),
         )
     return True
 
@@ -386,12 +391,13 @@ def vocab_import_ascend(chat_id: int, data: dict) -> int:
         translation = it.get("russian") or it.get("uzbek") or it.get("meaning")
         if not eng or not translation:
             continue
+        uzbek = it.get("uzbek") if it.get("russian") else None
         stage = it.get("stage")
         box = None
         if isinstance(stage, (int, float)):
             box = max(0, min(round(stage / 11 * max_box), max_box))
         due = _parse_date_like(it.get("nextReview"))
-        if vocab_add(chat_id, str(eng), str(translation), box=box, due=due):
+        if vocab_add(chat_id, str(eng), str(translation), box=box, due=due, extra=uzbek):
             added += 1
     return added
 
@@ -470,7 +476,11 @@ def vocab_counts(chat_id: int):
         due = conn.execute(
             "SELECT COUNT(*) c FROM vocab WHERE chat_id=? AND due<=?", (chat_id, today)
         ).fetchone()["c"]
-    return total, due
+        rows = conn.execute(
+            "SELECT box, COUNT(*) c FROM vocab WHERE chat_id=? GROUP BY box", (chat_id,)
+        ).fetchall()
+    by_box = {r["box"]: r["c"] for r in rows}
+    return total, due, by_box
 
 
 def register_user(chat_id: int):
@@ -861,7 +871,7 @@ def _vocab_card_kb_back(card_id: int):
 async def _send_next_card(context, chat_id):
     row = vocab_next(chat_id)
     if row is None:
-        total, _ = vocab_counts(chat_id)
+        total, _, _ = vocab_counts(chat_id)
         if total == 0:
             await context.bot.send_message(
                 chat_id,
@@ -886,7 +896,7 @@ async def cmd_addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = " ".join(context.args) if context.args else ""
     added = vocab_import(update.effective_chat.id, text) if text else 0
     if added:
-        total, due = vocab_counts(update.effective_chat.id)
+        total, due, _ = vocab_counts(update.effective_chat.id)
         await update.message.reply_text(f"➕ Добавлено! Всего слов: {total}. Напиши /vocab для тренировки.")
     else:
         await update.message.reply_text(
@@ -895,10 +905,22 @@ async def cmd_addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_vocabstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    total, due = vocab_counts(update.effective_chat.id)
-    await update.message.reply_text(
-        f"📚 Словарь: {total} слов, к повторению сегодня: {due}."
-    )
+    total, due, by_box = vocab_counts(update.effective_chat.id)
+    max_box = len(VOCAB_INTERVALS) - 1
+    learned = by_box.get(max_box, 0)
+    new_words = by_box.get(0, 0)
+    learning = total - learned - new_words
+    lines = [
+        "📚 Твой словарь",
+        "",
+        f"Всего слов: {total}",
+        f"✅ Хорошо знаешь: {learned}",
+        f"📖 В процессе изучения: {learning}",
+        f"🆕 Новые / нужно повторить: {new_words}",
+        "",
+        f"🕒 К повторению сегодня: {due}",
+    ]
+    await update.message.reply_text("\n".join(lines))
 
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -928,7 +950,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         added = vocab_import_json(update.effective_chat.id, text)
     if not added:  # None (not JSON) or 0 — fall back to line parsing
         added = vocab_import(update.effective_chat.id, text)
-    total, _ = vocab_counts(update.effective_chat.id)
+    total, _, _ = vocab_counts(update.effective_chat.id)
     if added:
         await update.message.reply_text(
             f"✅ Импортировал {added} слов. Всего: {total}. Напиши /vocab чтобы начать!"
@@ -1187,9 +1209,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("voc_show:"):
         row = vocab_get(int(data.split(":")[1]))
         if row:
+            text = f"🇬🇧 <b>{row['front']}</b>\n🇷🇺 {row['back']}"
+            if row["extra"]:
+                text += f"\n🇺🇿 {row['extra']}"
             await q.edit_message_text(
-                f"🇬🇧 <b>{row['front']}</b>\n🇷🇺 {row['back']}",
-                parse_mode="HTML", reply_markup=_vocab_card_kb_back(row["id"]),
+                text, parse_mode="HTML", reply_markup=_vocab_card_kb_back(row["id"]),
             )
     elif data.startswith("voc_know:") or data.startswith("voc_no:"):
         cid = int(data.split(":")[1])
