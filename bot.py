@@ -53,9 +53,12 @@ REPEATER_URL = os.environ.get("REPEATER_URL", "")
 WORK_DEFAULT = 25   # Pomodoro work minutes
 BREAK_DEFAULT = 5   # Pomodoro break minutes
 
-# --- AI assistant (Google Gemini, free tier) ---
+# --- AI assistant (Groq, free tier, OpenAI-compatible) ---
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
-AI_MODEL = os.environ.get("AI_MODEL", "gemini-2.5-flash")
+AI_MODEL = os.environ.get("AI_MODEL", "llama-3.3-70b-versatile")
+AI_BASE_URL = os.environ.get(
+    "AI_BASE_URL", "https://api.groq.com/openai/v1/chat/completions"
+)
 AI_SYSTEM_PROMPT = (
     "Ты — дружелюбный помощник по учёбе для студента из Узбекистана, "
     "который готовится к экзамену по математике и физике (28 августа). "
@@ -395,24 +398,23 @@ async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ask_ai(chat_id: int, user_text: str) -> str:
-    """Send the user's message (with recent history) to Gemini and return the reply."""
+    """Send the user's message (with recent history) to the AI and return the reply."""
     hist = AI_HISTORY.setdefault(chat_id, [])
-    hist.append({"role": "user", "parts": [{"text": user_text}]})
+    hist.append({"role": "user", "content": user_text})
+    messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}] + hist[-16:]
     payload = {
-        "system_instruction": {"parts": [{"text": AI_SYSTEM_PROMPT}]},
-        "contents": hist[-16:],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 900},
+        "model": AI_MODEL,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 900,
     }
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{AI_MODEL}:generateContent?key={AI_API_KEY}"
-    )
+    headers = {"Authorization": f"Bearer {AI_API_KEY}"}
     async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(url, json=payload)
+        r = await client.post(AI_BASE_URL, json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()
-    reply = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    hist.append({"role": "model", "parts": [{"text": reply}]})
+    reply = data["choices"][0]["message"]["content"].strip()
+    hist.append({"role": "assistant", "content": reply})
     # Keep history bounded.
     if len(hist) > 24:
         del hist[: len(hist) - 24]
@@ -425,8 +427,8 @@ async def on_ai_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not AI_API_KEY:
         await update.message.reply_text(
-            "🤖 ИИ-помощник ещё не подключён. Нужен бесплатный ключ Gemini "
-            "(google AI Studio) — попроси помощи с настройкой."
+            "🤖 ИИ-помощник ещё не подключён. Нужен бесплатный ИИ-ключ "
+            "(Groq) — попроси помощи с настройкой."
         )
         return
     chat_id = update.effective_chat.id
