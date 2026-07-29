@@ -284,6 +284,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "sessions, keep your stats, and open your English apps right here.\n\n"
         "Commands:\n"
         "/plan — see your whole daily plan\n"
+        "/now — what should I do right now\n"
         "/reload — apply plan changes you made on GitHub\n"
         "/pomodoro — start a focus timer (default 25/5)\n"
         "/stop — stop the current focus timer\n"
@@ -335,6 +336,42 @@ def _format_plan() -> str:
 
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(_format_plan(), parse_mode="Markdown")
+
+
+async def cmd_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tell the user what they should be doing right now, and what's next."""
+    now = datetime.now(TZ)
+    weekday = now.weekday()
+    today = sorted(
+        [(h, m, msg) for h, m, days, msg in REMINDERS if weekday in days],
+        key=lambda x: (x[0], x[1]),
+    )
+    if not today:
+        await update.message.reply_text(
+            f"🕒 Сейчас {now.strftime('%H:%M')}\n\nНа сегодня в плане ничего нет. Отдыхай 🙂"
+        )
+        return
+
+    now_min = now.hour * 60 + now.minute
+    current = None
+    nxt = None
+    for h, m, msg in today:
+        if h * 60 + m <= now_min:
+            current = (h, m, msg)
+        elif nxt is None:
+            nxt = (h, m, msg)
+
+    lines = [f"🕒 Сейчас {now.strftime('%H:%M')}"]
+    if current:
+        lines.append(f"\n👉 Сейчас ({current[0]:02d}:{current[1]:02d}): {current[2]}")
+    else:
+        first = today[0]
+        lines.append(f"\n🌙 День ещё не начался. Первое дело в {first[0]:02d}:{first[1]:02d}.")
+    if nxt:
+        lines.append(f"\n⏭️ Дальше в {nxt[0]:02d}:{nxt[1]:02d}: {nxt[2]}")
+    elif current:
+        lines.append("\n✅ На сегодня всё. Отдыхай и ложись вовремя.")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -547,6 +584,7 @@ async def post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "Open the menu"),
         BotCommand("plan", "See your daily plan"),
+        BotCommand("now", "What should I do now?"),
         BotCommand("reload", "Load plan changes from GitHub"),
         BotCommand("pomodoro", "Start a focus timer"),
         BotCommand("stop", "Stop the focus timer"),
@@ -583,6 +621,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("plan", cmd_plan))
+    app.add_handler(CommandHandler("now", cmd_now))
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("pomodoro", cmd_pomodoro))
     app.add_handler(CommandHandler("stop", cmd_stop))
