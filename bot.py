@@ -16,6 +16,7 @@ Everything is one file so it is easy to deploy. See README.md for setup.
 import os
 import asyncio
 import sqlite3
+import subprocess
 import logging
 from datetime import time as dtime, datetime
 from zoneinfo import ZoneInfo
@@ -126,7 +127,7 @@ def parse_days(token: str) -> set:
 
 def write_default_schedule(path: str):
     header = [
-        "# YOUR DAILY PLAN — edit this file, save it, then restart the bot.",
+        "# YOUR DAILY PLAN — edit this file on GitHub, then send /reload in Telegram.",
         "# Format:   HH:MM | days | message",
         "# days can be:  all   mon-sat   sun   or a list like  mon,wed,fri",
         "# Lines starting with # are notes and are ignored.",
@@ -283,6 +284,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "sessions, keep your stats, and open your English apps right here.\n\n"
         "Commands:\n"
         "/plan — see your whole daily plan\n"
+        "/reload — apply plan changes you made on GitHub\n"
         "/pomodoro — start a focus timer (default 25/5)\n"
         "/stop — stop the current focus timer\n"
         "/stats — see your focus stats\n"
@@ -333,6 +335,28 @@ def _format_plan() -> str:
 
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(_format_plan(), parse_mode="Markdown")
+
+
+async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Pull the latest schedule.txt from GitHub and apply it live."""
+    await update.message.reply_text("🔄 Updating your plan…")
+    # 1. Try to fetch the newest schedule.txt from GitHub.
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        subprocess.run(
+            ["git", "pull", "--no-rebase"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=45,
+        )
+    except Exception as e:
+        log.warning("git pull failed: %s", e)
+    # 2. Reload the plan from the file and reschedule the reminders.
+    global REMINDERS
+    REMINDERS = load_schedule(SCHEDULE_FILE)
+    reschedule_reminders(context.application)
+    await update.message.reply_text(
+        f"✅ Plan updated — {len(REMINDERS)} reminders active.\n\n" + _format_plan(),
+        parse_mode="Markdown",
+    )
 
 
 async def cmd_pomodoro(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -498,14 +522,22 @@ async def reminder_cb(context: ContextTypes.DEFAULT_TYPE):
 
 
 def schedule_reminders(app: Application):
-    for hour, minute, days, text in REMINDERS:
+    for i, (hour, minute, days, text) in enumerate(REMINDERS):
         app.job_queue.run_daily(
             reminder_cb,
             time=dtime(hour=hour, minute=minute, tzinfo=TZ),
             data={"days": days, "text": text},
-            name=f"rem-{hour:02d}{minute:02d}",
+            name=f"rem-{i}",
         )
     log.info("Scheduled %d daily reminders", len(REMINDERS))
+
+
+def reschedule_reminders(app: Application):
+    """Remove existing reminder jobs and re-add them from the current plan."""
+    for job in app.job_queue.jobs():
+        if job.name and job.name.startswith("rem-"):
+            job.schedule_removal()
+    schedule_reminders(app)
 
 
 # --------------------------------------------------------------------------- #
@@ -515,6 +547,7 @@ async def post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "Open the menu"),
         BotCommand("plan", "See your daily plan"),
+        BotCommand("reload", "Load plan changes from GitHub"),
         BotCommand("pomodoro", "Start a focus timer"),
         BotCommand("stop", "Stop the focus timer"),
         BotCommand("stats", "See your focus stats"),
@@ -550,6 +583,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("plan", cmd_plan))
+    app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("pomodoro", cmd_pomodoro))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("stats", cmd_stats))

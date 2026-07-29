@@ -1,0 +1,18 @@
+# YOUR DAILY PLAN — edit this file on GitHub, then send /reload in Telegram.
+# Format:   HH:MM | days | message
+# days can be:  all   mon-sat   sun   or a list like  mon,wed,fri
+# Lines starting with # are notes and are ignored.
+
+06:00 | mon-sat | ☀️ Wake up. Wash, breakfast, pack your bag. Leave by 6:30.
+06:30 | mon-sat | 🚌 Commute — open English or Russian practice. Tap /apps for the Vocab Trainer.
+12:30 | mon-sat | 🚌 Heading home — start homework NOW while the lesson is fresh. Redo the class examples.
+15:00 | mon-sat | 🐔 Poultry care, then real rest.
+16:00 | mon-sat | 🏃 Fitness — move your body, then shower. It sharpens your evening focus.
+17:30 | mon-sat | 📚 Homework block 1 — finish the problem set. Try /pomodoro.
+19:30 | mon-sat | 🔥 Your peak hours. Hardest work now: finish homework, then drill weak fundamentals. /pomodoro
+21:30 | mon-sat | 🔁 Light review — flashcards or a short dose of the other language. /apps
+22:00 | mon-sat | 🌙 Wind down. Pack tomorrow's bag. No hard screens.
+22:50 | mon-sat | 😴 Sleep soon — you need 7 hours. Lights out by 23:00.
+07:30 | sun | 🌤️ Slow Sunday. Hygiene, poultry, a good breakfast, rest.
+16:00 | sun | 📖 Catch-up study (2–3h): weak spots from the week + one timed practice test. /pomodoro
+21:30 | sun | ✅ Wrap up and recharge for Monday. Sleep on time.
